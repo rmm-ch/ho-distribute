@@ -15,7 +15,6 @@ import bluepy.btle as btle
 import struct
 import time
 import argparse
-import struct
 import datetime as dt
 
 HO_TIME_SVC          = "00001001-bee5-bee5-0002-bee5bee5bee5"

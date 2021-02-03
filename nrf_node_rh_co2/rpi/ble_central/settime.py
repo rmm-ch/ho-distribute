@@ -12,7 +12,6 @@ xxxx=0x3001
 
 '''
 import bluepy.btle as btle
-import struct
 import time
 import argparse
 import struct

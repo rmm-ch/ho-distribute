@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
-import bluepy.btle as btle
-import struct
-import time
+# -*- coding: utf-8 -*-
+'''
+tool that does various simple interactions with MOBOTS nRF sensor tag in
+one-shot usage, such as changing sampling rates, setting nRF time.
+'''
+
 import argparse
+import time
+import bluepy.btle as btle
 import lib_hoble
 
 if __name__ == "__main__": #noqa
@@ -12,10 +17,10 @@ if __name__ == "__main__": #noqa
                         help="address of the BLE peripheral with NRF LEDBUTTON service")
     parser.add_argument('-v', '--verb', action='store_true')
     parser.add_argument('-c', '--cmd', type=int, default=0)
-    parser.add_argument('-r', '--max_retries', type=int, default=3)
-    parser.add_argument('-g', '--arg',  default=None)
-    parser.add_argument('-o', '--logfile', type=str, default=None,
-                        help="path to logfile. If None, no data written.")
+    #parser.add_argument('-r', '--max_retries', type=int, default=3)
+    parser.add_argument('-g', '--arg', default=None)
+    #parser.add_argument('-o', '--logfile', type=str, default=None,
+    #                    help="path to logfile. If None, no data written.")
     args = parser.parse_args()
 
     #addr_type = btle.ADDR_TYPE_PUBLIC
@@ -38,17 +43,15 @@ if __name__ == "__main__": #noqa
         #   opt should be in [_HO_I2CDOM_ON, _HO_I2CDOM_OFF, _HO_I2CDOM_TOGGLE]
         opt = lib_hoble._HO_I2CDOM_TOGGLE # default
         if args.arg is not None:
-            if type(args.arg) is int:
+            if isinstance(args.arg, int):
                 opt = args.arg
-            elif type(args.arg) is str:
+            elif isinstance(args.arg, str):
                 if args.arg == "on":
                     opt = lib_hoble._HO_I2CDOM_ON
                 elif args.arg == "off":
                     opt = lib_hoble._HO_I2CDOM_OFF
                 elif args.arg in ["tog", "toggle"]:
                     opt = lib_hoble._HO_I2CDOM_TOGGLE
-
-
 
         if opt in [lib_hoble._HO_I2CDOM_ON, lib_hoble._HO_I2CDOM_OFF, lib_hoble._HO_I2CDOM_TOGGLE]:
             ret = lib_hoble.snsr_cfg_i2cdomain(conn, opt)
@@ -57,7 +60,6 @@ if __name__ == "__main__": #noqa
             print("[W] opt nt valid. didn't do it. ")
 
 
-        pass
     elif args.cmd == 1:
         # set period
         arg8 = lib_hoble.AMM_10_SEC
@@ -86,7 +88,7 @@ if __name__ == "__main__": #noqa
         # and also the sensor auto meas mode)
         if args.arg is None:
             raise RuntimeError("[E] need to set argument!.")
-        if int(args.arg) <2 or int(args.arg) > 1800:
+        if int(args.arg) < 2 or int(args.arg) > 1800:
             raise RuntimeError("[E] invalid settting! {}".format(args.arg))
 
         arg16 = int(args.arg)
@@ -101,7 +103,7 @@ if __name__ == "__main__": #noqa
         if args.arg is not None:
             raise RuntimeError("[E] no arg needed!")
 
-        cmd = lib_hoble.HO_CFG_SCD_STOPSAMP;
+        cmd = lib_hoble.HO_CFG_SCD_STOPSAMP
         ret = lib_hoble.snsr_cfg0(conn, cmd)
         print("[I] sent command {} ({})".format(ret, "no args"))
 
@@ -116,5 +118,4 @@ if __name__ == "__main__": #noqa
         print("[I] readback time.")
         ret = lib_hoble.comparetime(conn)
         print("[I] return value: {}".format(ret))
-
 
