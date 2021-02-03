@@ -52,6 +52,7 @@ def mkdir_p(path):
         else: raise
 #}}}
 
+REPORT_IVAL = 30 # sec. Just indicates "Waiting...<sec elap> | <hh:mm:ss>
 
 #{{{ UUID definitions
 #LBS_UUID_SERVICE     = "00001523-1212-efde-1523-785feabcd123"
@@ -106,10 +107,20 @@ def conv_hdc_ts_from_bytes(bytestr):
     u32_ts = B[4] | B[5] << 8 | B[6] << 16 | B[7] << 24;
     return u32_ts
 
-def conv_hdc_from_bytes(bytestr):
+def conv_hdc_utc_from_bytes(bytestr):
+    B = bytes.fromhex(bytestr)
+    u32_time_s = B[8] | B[9] << 8 | B[10] << 16 | B[11] << 24;
+    return (u32_time_s)
+
+def conv_hdc_from_bytes(bytestr, ty4=True):
     f_temp     = conv_hdc_T_from_bytes(bytestr)
     f_hum_pct  = conv_hdc_RH_from_bytes(bytestr)
     f_timestep = conv_hdc_ts_from_bytes(bytestr)
+    if len(bytestr)>= 12:
+        #f_time_s = conv_hdc_t0_from_bytes(bytestr)
+        utime_s = conv_hdc_utc_from_bytes(bytestr)
+        if ty4:
+            return (f_temp, f_hum_pct, f_timestep, utime_s)
 
     return (f_temp, f_hum_pct, f_timestep)
 
@@ -119,6 +130,99 @@ def disp_hdc_from_bytes(bytestr, prefix="   "):
 
 
 
+# }}}
+
+#{{{ conversion of received data to readable
+def bytes_to_u32(b, bigendian=True):
+    if bigendian:
+        u32 = (b[0] | b[1] << 8 | b[2] << 16 | b[3] << 24)
+    else:
+        u32 = (b[3] | b[2] << 8 | b[1] << 16 | b[0] << 24)
+
+    return u32
+
+def bytes_to_u16(b, bigendian=True):
+    if bigendian:
+        u16 = (b[0] | b[1] << 8 )
+    else:
+        u16 = (b[1] | b[0] << 8)
+
+    return u16
+
+def conv_bat_from_bytes(bytestr):
+    B = bytes.fromhex(bytestr)
+    # 0:4 -> timestamp
+    # 4:6 -> i_batmon
+    # 6:8 -> i_vdd
+    b_ts   = B[0:4]
+    b_bat  = B[4:6]
+    b_vdd  = B[6:8]
+
+    time_s = bytes_to_u32(b_ts)
+    i_bat = bytes_to_u16(b_bat)
+    i_vdd = bytes_to_u16(b_vdd)
+
+    #uint32_t v_meas = i_bat_mon * 3.515625f;  // 1000x larger, for simple "float" print
+    #uint32_t v_bat = v_meas * 65536 /46711;   // voltage divider
+    #uint32_t v_vdd = i_vdd * 3.515625f;       // 1000x larger
+
+
+    v_bat = (i_bat * 3.515625) * (65536.0 / 46711.0 ) * (1.0/1000.0)
+    v_vdd = i_vdd * 3.515625 / 1000.0
+
+
+
+    return (time_s, v_bat, v_vdd)
+
+def conv_scd_from_bytes(bytestr):
+    B = bytes.fromhex(bytestr)
+    # 0:4 -> timestamp
+    # 4:8 -> sequence
+    # 8:12   CO2, in float format
+    # 12:16  temp in float format
+    # 16:20  RHum in float format
+    b_ts   = B[0:4]
+    b_seq  = B[4:8]
+    b_co2  = B[8:12]
+    b_temp = B[12:16]
+    b_rh   = B[16:20]
+
+    seq = bytes_to_u32(b_seq)
+    time_s = bytes_to_u32(b_ts)
+
+    # not sure why endian change here? did I transmit in reverse?
+    #memcpy(&buffer[8], (uint32_t*)&p_tag_data->p_scd30_data->raw_CO2, 4);
+    # anyway, the data is received this way around.
+    temp = struct.unpack("<f", b_temp)[0]
+    co2  = struct.unpack("<f", b_co2)[0]
+    RH   = struct.unpack("<f", b_rh)[0]
+
+
+    return (time_s, seq, co2, temp, RH)
+
+def fmt_time(time_s, fmt='%H:%M:%S'):
+    return datetime.datetime.fromtimestamp(time_s).strftime('%H:%M:%S')
+
+def str_bat_from_bytes(bytestr):
+    (time_s, v_bat, v_vdd) = conv_bat_from_bytes(bytestr)
+    s = "{}  Vbat {:.3f} Vdd {:.3f}".format(
+        fmt_time(time_s), v_bat, v_vdd)
+    return s
+    #
+
+
+def str_hdc_from_bytes(bytestr):
+    (f_temp, f_hum_pct, f_timestep, utime_s) = conv_hdc_from_bytes(bytestr)
+    s = "{}  {:+5.3f}oC {:.2f}%RH".format(
+        fmt_time(utime_s), f_temp, f_hum_pct)
+        #fmt_time(f_timestep), f_temp, f_hum_pct)
+    return s
+
+def str_scd_from_bytes(bytestr):
+    (time_s, seq, co2, temp, RH) = conv_scd_from_bytes(bytestr)
+    s = "{}  {:+5.3f}oC {:.2f}%RH {:6.2f}ppm ({})".format(
+        fmt_time(time_s), temp, RH, co2, seq)
+    return s
 
 # }}}
 
@@ -179,7 +283,8 @@ class MulitPartReaderDgt(btle.DefaultDelegate):
     put all elements together that correspond to a single message, between
     the characters defined in `start`/`end` args.
     '''
-    def __init__(self, exptlbl, start="$", end="*", logdir=None, handle_map={}, verb=0):
+    def __init__(self, exptlbl, start="$", end="*", logdir=None, handle_map={},
+                 verb=0, conv_inc=False):
         #handles=[]):
         btle.DefaultDelegate.__init__(self)
         # ... initialise here
@@ -196,6 +301,7 @@ class MulitPartReaderDgt(btle.DefaultDelegate):
         self._shadow_msgs = []
         self.expt_handles = handle_map
         self.verb         = verb
+        self.conv_inc     = conv_inc
         self._last_multipart = ""
 
 
@@ -309,37 +415,47 @@ class MulitPartReaderDgt(btle.DefaultDelegate):
 
         thebytes = "".join(["{:02x}".format(b) for b in bytearray(data)])
 
+        short = thebytes[:]
         # handle-specific processing
         if (_hname.startswith("batlvl")):
+            lab = "[BAT]"
+            if self.conv_inc:
+                short = str_bat_from_bytes(thebytes)
+
             self._last_info3 = "[I-{:5d}] recv [{}] ({}by)".format(
-                    self.recv_msgs, thebytes, self.recv_byte)
-            #self._last_info3 = "[I-{:5d}] recv [{}] '{}' ({}by)".format(
-            #        self.recv_msgs, thebytes, data, self.recv_byte)
-            print("   ##H{}{} ".format(cHandle, "[BAT]") + self._last_info3)
+                    self.recv_msgs, short, self.recv_byte)
+
+            print("   ##H{}{} {}".format(cHandle, lab, self._last_info3))
+            #print("   ##H{}{} ".format(cHandle, "[BAT]") + self._last_info3)
             #self._recent_msgs.append(thebytes)#.decode('utf-8'))
             if self.logf_bat is not None:
                 with(open(self.logf_bat, "a")) as lf:
                     lf.write(thebytes + "\n");
-            pass
 
         elif (_hname.startswith("SCD")):
-            self._last_info2 = "[I-{:5d}] recv [{}] '{}' ({}by)".format(
-                    self.recv_msgs, thebytes, data, self.recv_byte)
-            print("   ##H{}{} ".format(cHandle, "[SCD]") + self._last_info2)
+            lab = "[SCD]"
+            if self.conv_inc:
+                short = str_scd_from_bytes(thebytes)
+
+            self._last_info2 = "[I-{:5d}] recv [{}] ({}by)".format(
+                    self.recv_msgs, short, self.recv_byte)
+            print("   ##H{}{} ".format(cHandle, lab)  + self._last_info2)
             if self.logf_scd is not None:
                 with(open(self.logf_scd, "a")) as lf:
                     lf.write(thebytes + "\n");
-            pass
+
         elif (_hname.startswith("raw/bulk")):
+            lab = "[HDC]"
+            if self.conv_inc:
+                short = str_hdc_from_bytes(thebytes)
+
+
             self._last_info = "[I-{:5d}] recv [{}] ({}by)".format(
-                    self.recv_msgs, thebytes, self.recv_byte)
-            #self._last_info = "[I-{:5d}] recv [{}] '{}' ({}by)".format(
-            #        self.recv_msgs, thebytes, data, self.recv_byte)
+                    self.recv_msgs, short, self.recv_byte)
             self._last_msg = data
-            print("   ##H{}{} ".format(cHandle, "[HDC]") + self._last_info)
-            #print(self._last_info)
+            print("   ##H{}{} ".format(cHandle, lab) + self._last_info)
             self._recent_msgs.append(thebytes)#.decode('utf-8'))
-            pass
+
 
 
 
@@ -383,7 +499,8 @@ def settime(conn):
 
 
 #{{{ mainloop gathering data
-def mainloop(conn, addr, exptlbl, logdir, verb=0, imax=None, sleep_period=0.5):
+def mainloop(conn, addr, exptlbl, logdir, verb=0, imax=None, sleep_period=0.5,
+             conv_inc=False):
 
     time.sleep(sleep_period)
     #TODO: implement a handle to disconnect in case of unexpected stop. (atexit?)
@@ -430,7 +547,8 @@ def mainloop(conn, addr, exptlbl, logdir, verb=0, imax=None, sleep_period=0.5):
             len(handle_map), " ".join(["{}".format(vh) for vh in handle_map.keys()]) ))
         # attach delegate to handle incoming notifications
         the_dgt = MulitPartReaderDgt(exptlbl=exptlbl, logdir=logdir,
-                                     handle_map=handle_map, verb=verb)
+                                     handle_map=handle_map, verb=verb,
+                                     conv_inc=conv_inc)
         conn.withDelegate(the_dgt)
         i= 0
         while True:
@@ -451,7 +569,7 @@ def mainloop(conn, addr, exptlbl, logdir, verb=0, imax=None, sleep_period=0.5):
                 continue
 
             i += 1
-            if i % 10 == 0:
+            if i % REPORT_IVAL == 0:
                 now = datetime.datetime.now()
                 print("Waiting... {:3d} | {}".format(i, now.strftime("%H:%M:%S")))
 
@@ -467,6 +585,8 @@ if __name__ == "__main__": #noqa
                         help="address of the BLE peripheral with NRF LEDBUTTON service")
     #parser.add_argument('-v', '--verb', action='store_true')
     parser.add_argument('-v', '--verb', action='count', default=0)
+    parser.add_argument('-ci', '--conv_incoming', action='store_true',
+                        help="switch to show converted incoming data or raw bytes")
     parser.add_argument('-i', '--imax', type=int, default=None,
                         help="maximum iterations to listen for, leave as none to wait forever (/until ctrl-c)")
     parser.add_argument('-r', '--max_retries', type=int, default=3)
@@ -490,6 +610,7 @@ if __name__ == "__main__": #noqa
 
     #{{{ reconnector loop
     retry_cnt = 0
+    conn = None
     while True:
         try:
             s1 = "Connecting to: {}, address type: {}. {}th time".format(
@@ -503,7 +624,7 @@ if __name__ == "__main__": #noqa
                 dump_log_line(syslog, s1)
 
             mainloop(conn, args.addr, args.exptlbl, args.logdir, verb=args.verb,
-                     imax=args.imax, sleep_period=0.5)
+                     imax=args.imax, sleep_period=0.5, conv_inc=args.conv_incoming)
         except KeyboardInterrupt as e:
             s1 = "[I] ctrl c pressed. bye."
             dump_log_line(syslog, s1)
@@ -524,9 +645,13 @@ if __name__ == "__main__": #noqa
                 break
     #}}}
 
-    conn.disconnect()
-    s1 = "[I] disconnected from peer {}.".format(args.addr)
+    if conn is not None:
+        conn.disconnect()
+        s1 = "[I] disconnected from peer {}.".format(args.addr)
+    else:
+        s1 = "[W] did not make connection to peer {}".format(args.addr)
     dump_log_line(syslog, s1)
+
 
 
 
