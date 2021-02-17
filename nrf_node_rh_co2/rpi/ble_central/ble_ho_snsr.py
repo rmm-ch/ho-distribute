@@ -26,6 +26,8 @@ note: to view incoming data,
    and then to print we can use
    txt_of_dat = "".join(["{:02x}".format(b) for b in dat])
 
+- data is logged one sample per line. the format can be raw binary (with
+  --log_format 1) or human-readable floats (with --log_format 2)
 
 '''
 #}}}
@@ -37,6 +39,30 @@ import argparse, os.path
 import os, errno
 
 import copy
+
+from lib_hoble import (conv_scd_from_bytes, str_scd_from_bytes,
+                       bytes_to_u32, bytes_to_u16,
+                       conv_hdc_from_bytes,
+                       conv_bat_from_bytes,
+                       )
+
+'''
+TODO logformat updating
+
+- tidy up the mess of repeated funcs in libraries
+- write headers (depending on file types)
+- variable ordering in conv_hdc_from_bytes --> avoid having to invert after
+  using the function
+
+- what is possible to move to lib only:
+  - verify usage of all functions in this tool
+  - verify usage of all UUIDs
+
+
+
+
+
+'''
 
 #{{{ mkdir_p
 def mkdir_p(path):
@@ -112,93 +138,11 @@ def conv_hdc_utc_from_bytes(bytestr):
     u32_time_s = B[8] | B[9] << 8 | B[10] << 16 | B[11] << 24;
     return (u32_time_s)
 
-def conv_hdc_from_bytes(bytestr, ty4=True):
-    f_temp     = conv_hdc_T_from_bytes(bytestr)
-    f_hum_pct  = conv_hdc_RH_from_bytes(bytestr)
-    f_timestep = conv_hdc_ts_from_bytes(bytestr)
-    if len(bytestr)>= 12:
-        #f_time_s = conv_hdc_t0_from_bytes(bytestr)
-        utime_s = conv_hdc_utc_from_bytes(bytestr)
-        if ty4:
-            return (f_temp, f_hum_pct, f_timestep, utime_s)
-
-    return (f_temp, f_hum_pct, f_timestep)
-
-def disp_hdc_from_bytes(bytestr, prefix="   "):
-    (f_temp, f_hum_pct, f_timestep) = conv_hdc_from_bytes(bytestr)
-    print("{}{:4}:{:+5.3f}oC {:.2f}%RH".format(prefix, f_timestep, f_temp, f_hum_pct))
-
-
 
 # }}}
 
 #{{{ conversion of received data to readable
-def bytes_to_u32(b, bigendian=True):
-    if bigendian:
-        u32 = (b[0] | b[1] << 8 | b[2] << 16 | b[3] << 24)
-    else:
-        u32 = (b[3] | b[2] << 8 | b[1] << 16 | b[0] << 24)
 
-    return u32
-
-def bytes_to_u16(b, bigendian=True):
-    if bigendian:
-        u16 = (b[0] | b[1] << 8 )
-    else:
-        u16 = (b[1] | b[0] << 8)
-
-    return u16
-
-def conv_bat_from_bytes(bytestr):
-    B = bytes.fromhex(bytestr)
-    # 0:4 -> timestamp
-    # 4:6 -> i_batmon
-    # 6:8 -> i_vdd
-    b_ts   = B[0:4]
-    b_bat  = B[4:6]
-    b_vdd  = B[6:8]
-
-    time_s = bytes_to_u32(b_ts)
-    i_bat = bytes_to_u16(b_bat)
-    i_vdd = bytes_to_u16(b_vdd)
-
-    #uint32_t v_meas = i_bat_mon * 3.515625f;  // 1000x larger, for simple "float" print
-    #uint32_t v_bat = v_meas * 65536 /46711;   // voltage divider
-    #uint32_t v_vdd = i_vdd * 3.515625f;       // 1000x larger
-
-
-    v_bat = (i_bat * 3.515625) * (65536.0 / 46711.0 ) * (1.0/1000.0)
-    v_vdd = i_vdd * 3.515625 / 1000.0
-
-
-
-    return (time_s, v_bat, v_vdd)
-
-def conv_scd_from_bytes(bytestr):
-    B = bytes.fromhex(bytestr)
-    # 0:4 -> timestamp
-    # 4:8 -> sequence
-    # 8:12   CO2, in float format
-    # 12:16  temp in float format
-    # 16:20  RHum in float format
-    b_ts   = B[0:4]
-    b_seq  = B[4:8]
-    b_co2  = B[8:12]
-    b_temp = B[12:16]
-    b_rh   = B[16:20]
-
-    seq = bytes_to_u32(b_seq)
-    time_s = bytes_to_u32(b_ts)
-
-    # not sure why endian change here? did I transmit in reverse?
-    #memcpy(&buffer[8], (uint32_t*)&p_tag_data->p_scd30_data->raw_CO2, 4);
-    # anyway, the data is received this way around.
-    temp = struct.unpack("<f", b_temp)[0]
-    co2  = struct.unpack("<f", b_co2)[0]
-    RH   = struct.unpack("<f", b_rh)[0]
-
-
-    return (time_s, seq, co2, temp, RH)
 
 def fmt_time(time_s, fmt='%H:%M:%S'):
     return datetime.datetime.fromtimestamp(time_s).strftime('%H:%M:%S')
@@ -218,11 +162,6 @@ def str_hdc_from_bytes(bytestr):
         #fmt_time(f_timestep), f_temp, f_hum_pct)
     return s
 
-def str_scd_from_bytes(bytestr):
-    (time_s, seq, co2, temp, RH) = conv_scd_from_bytes(bytestr)
-    s = "{}  {:+5.3f}oC {:.2f}%RH {:6.2f}ppm ({})".format(
-        fmt_time(time_s), temp, RH, co2, seq)
-    return s
 
 # }}}
 
@@ -284,7 +223,7 @@ class MulitPartReaderDgt(btle.DefaultDelegate):
     the characters defined in `start`/`end` args.
     '''
     def __init__(self, exptlbl, start="$", end="*", logdir=None, handle_map={},
-                 verb=0, conv_inc=False):
+                 verb=0, conv_inc=False, logfmt=2):
         #handles=[]):
         btle.DefaultDelegate.__init__(self)
         # ... initialise here
@@ -303,6 +242,7 @@ class MulitPartReaderDgt(btle.DefaultDelegate):
         self.verb         = verb
         self.conv_inc     = conv_inc
         self._last_multipart = ""
+        self.logfmt       = logfmt # 1=legacy, binary strings 2=csv human readable
 
 
         self.setup_logdir()
@@ -321,12 +261,34 @@ class MulitPartReaderDgt(btle.DefaultDelegate):
 
             # select log stub
             now = datetime.datetime.now()
+            # TODO: rmm update log formatting/log handling here Wed 17 Feb 2021 10:26:48 CET
             self._logstub = "{}_{}".format(now.strftime("%y%m%d"), self.exptlbl)
 
             #self.logf_sys = os.path.join(self.logdir, "{}.{}".format(self._logstub, "syslog"))
-            self.logf_bat = os.path.join(self.logdir, "{}.{}".format(self._logstub, "batlvl"))
-            self.logf_scd = os.path.join(self.logdir, "{}.{}".format(self._logstub, "datscd"))
-            self.logf_hdc = os.path.join(self.logdir, "{}.{}".format(self._logstub, "dathdc"))
+            suffix = ""
+            if self.logfmt == 2:
+                suffix = ".csv"
+            self.logf_bat = os.path.join(self.logdir, "{}.{}{}".format(self._logstub, "batlvl", suffix))
+            self.logf_scd = os.path.join(self.logdir, "{}.{}{}".format(self._logstub, "datscd", suffix))
+            self.logf_hdc = os.path.join(self.logdir, "{}.{}{}".format(self._logstub, "dathdc", suffix))
+
+            if self.logfmt == 2:
+                # write a header for each of the log files
+                # slightly clunky setup - better to loop?
+                with open(self.logf_scd, "w") as f:
+                    cols = ["timestamp", "seq", "CO2", "T", "RH"]
+                    hdr = ",".join(cols)
+                    f.write(hdr + "\n")
+                with open(self.logf_bat, "w") as f:
+                    cols = ["timestamp", "Vbat", "Vdd"]
+                    hdr = ",".join(cols)
+                    f.write(hdr + "\n")
+                with open(self.logf_hdc, "w") as f:
+                    cols = ["timestamp", "T", "RH", "seq"]
+                    hdr = ",".join(cols)
+                    f.write(hdr + "\n")
+
+
 
 
 
@@ -429,8 +391,15 @@ class MulitPartReaderDgt(btle.DefaultDelegate):
             #print("   ##H{}{} ".format(cHandle, "[BAT]") + self._last_info3)
             #self._recent_msgs.append(thebytes)#.decode('utf-8'))
             if self.logf_bat is not None:
-                with(open(self.logf_bat, "a")) as lf:
-                    lf.write(thebytes + "\n");
+                if self.logfmt == 1:
+                    with(open(self.logf_bat, "a")) as lf:
+                        lf.write(thebytes + "\n");
+                elif self.logfmt == 2:
+                    full_row = ",".join([str(e) for e in conv_bat_from_bytes(thebytes)])
+                    with(open(self.logf_bat, "a")) as lf:
+                        lf.write(full_row + "\n")
+
+
 
         elif (_hname.startswith("SCD")):
             lab = "[SCD]"
@@ -441,8 +410,14 @@ class MulitPartReaderDgt(btle.DefaultDelegate):
                     self.recv_msgs, short, self.recv_byte)
             print("   ##H{}{} ".format(cHandle, lab)  + self._last_info2)
             if self.logf_scd is not None:
-                with(open(self.logf_scd, "a")) as lf:
-                    lf.write(thebytes + "\n");
+                if self.logfmt == 1:
+                    with(open(self.logf_scd, "a")) as lf:
+                        lf.write(thebytes + "\n");
+                elif self.logfmt == 2:
+                    full_row = ",".join([str(e) for e in conv_scd_from_bytes(thebytes)])
+
+                    with(open(self.logf_scd, "a")) as lf:
+                        lf.write(full_row + "\n")
 
         elif (_hname.startswith("raw/bulk")):
             lab = "[HDC]"
@@ -454,7 +429,16 @@ class MulitPartReaderDgt(btle.DefaultDelegate):
                     self.recv_msgs, short, self.recv_byte)
             self._last_msg = data
             print("   ##H{}{} ".format(cHandle, lab) + self._last_info)
-            self._recent_msgs.append(thebytes)#.decode('utf-8'))
+            if self.logfmt == 1:
+                self._recent_msgs.append(thebytes)#.decode('utf-8'))
+            elif self.logfmt == 2:
+                # here do a reordering - the function returns a non-homogeneous order.
+                (f_temp, f_hum_pct, f_timestep, utime_s) = conv_hdc_from_bytes(thebytes)
+                full_row = ",".join([str(e) for e in (utime_s, f_temp, f_hum_pct, f_timestep)] )
+                self._recent_msgs.append(full_row)
+
+
+
 
 
 
@@ -500,7 +484,7 @@ def settime(conn):
 
 #{{{ mainloop gathering data
 def mainloop(conn, addr, exptlbl, logdir, verb=0, imax=None, sleep_period=0.5,
-             conv_inc=False):
+             conv_inc=False, logfmt=2):
 
     time.sleep(sleep_period)
     #TODO: implement a handle to disconnect in case of unexpected stop. (atexit?)
@@ -548,7 +532,7 @@ def mainloop(conn, addr, exptlbl, logdir, verb=0, imax=None, sleep_period=0.5,
         # attach delegate to handle incoming notifications
         the_dgt = MulitPartReaderDgt(exptlbl=exptlbl, logdir=logdir,
                                      handle_map=handle_map, verb=verb,
-                                     conv_inc=conv_inc)
+                                     conv_inc=conv_inc, logfmt=logfmt)
         conn.withDelegate(the_dgt)
         i= 0
         while True:
@@ -560,11 +544,7 @@ def mainloop(conn, addr, exptlbl, logdir, verb=0, imax=None, sleep_period=0.5,
             if conn.waitForNotifications(1.): # blocking for 1sec
                 #print(str(i) + "[I] recvieved ontify (on what channel/characteristic")
                 if verb>=1:
-                    try:
-                        if(len(the_dgt._recent_msgs)):
-                            disp_hdc_from_bytes(the_dgt._recent_msgs[-1], prefix=(" "*13))
-                    except exception as e:
-                        print("oops.", e)
+                    pass # no extra screen dumps for now
 
                 continue
 
@@ -572,6 +552,7 @@ def mainloop(conn, addr, exptlbl, logdir, verb=0, imax=None, sleep_period=0.5,
             if i % REPORT_IVAL == 0:
                 now = datetime.datetime.now()
                 print("Waiting... {:3d} | {}".format(i, now.strftime("%H:%M:%S")))
+                # TODO: rmm add uptime to this msg. Wed 17 Feb 2021 11:22:47 CET
 
             if imax is not None and i >= imax:
                 break
@@ -590,6 +571,8 @@ if __name__ == "__main__": #noqa
     parser.add_argument('-i', '--imax', type=int, default=None,
                         help="maximum iterations to listen for, leave as none to wait forever (/until ctrl-c)")
     parser.add_argument('-r', '--max_retries', type=int, default=3)
+    parser.add_argument('-f', '--log_format', type=int, default=2, choices=[1,2],
+                        help="how to store data: 1) raw binary strings or 2) interpreted numbers")
     parser.add_argument('-l', '--exptlbl', type=str, default="",
                         help="label to give to all log files.")
     parser.add_argument('-o', '--logdir', type=str, default=None,
@@ -624,7 +607,8 @@ if __name__ == "__main__": #noqa
                 dump_log_line(syslog, s1)
 
             mainloop(conn, args.addr, args.exptlbl, args.logdir, verb=args.verb,
-                     imax=args.imax, sleep_period=0.5, conv_inc=args.conv_incoming)
+                     imax=args.imax, sleep_period=0.5, conv_inc=args.conv_incoming,
+                     logfmt=args.log_format)
         except KeyboardInterrupt as e:
             s1 = "[I] ctrl c pressed. bye."
             dump_log_line(syslog, s1)
