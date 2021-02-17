@@ -7,6 +7,14 @@ inject data point by point from a log file
 no error checking!
 '''
 
+def read_creds():
+    with open('/home/pi/.influx_creds', 'r') as f:
+        username = next(f).strip().split('username=')[-1]
+        password = next(f).strip().split('password=')[-1]
+        database = next(f).strip().split('database=')[-1]
+    return username, password, database
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('-v', '--verb', action='store_true')
@@ -15,9 +23,7 @@ if __name__ == "__main__":
     parser.add_argument('-n', '--num', type=int, default=4)
     args = parser.parse_args()
 
-    ifuser = "";
-    ifpass = "";
-    ifdb = ""
+    ifuser, ifpass, ifdb = read_creds()
     ifhost = "localhost";
     ifport = 8086;
 
